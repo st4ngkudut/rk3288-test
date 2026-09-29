@@ -1,6 +1,6 @@
 name: Build RK3288 Kernel
 
-on:q
+on:
   workflow_dispatch:
     inputs:
       kernel_branch:

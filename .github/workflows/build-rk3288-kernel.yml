@@ -1,0 +1,309 @@
+name: Build RK3288 Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: "Armbian kernel branch"
+        required: true
+        type: choice
+        default: current
+        options:
+          - current
+          - edge
+
+      builder_name:
+        description: "Builder name"
+        required: true
+        type: string
+        default: ST4NGKUDUT
+
+env:
+  TZ: Asia/Jakarta
+  BOARD: tinkerboard
+  ARMBIAN_REPO: https://github.com/paolosabatino/armbian-build.git
+
+jobs:
+  build:
+    name: Build RK3288 Kernel
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+
+          df -h
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            git \
+            curl \
+            wget \
+            rsync \
+            unzip \
+            xz-utils \
+            gzip \
+            bzip2 \
+            tar \
+            bc \
+            bison \
+            flex \
+            build-essential \
+            gcc-arm-linux-gnueabihf \
+            g++-arm-linux-gnueabihf \
+            device-tree-compiler \
+            u-boot-tools \
+            libncurses-dev \
+            libssl-dev \
+            libelf-dev \
+            python3 \
+            python3-dev \
+            python3-pip \
+            python3-setuptools \
+            python3-pyelftools \
+            swig \
+            ccache \
+            fakeroot \
+            debootstrap \
+            qemu-user-static
+
+      - name: Clone Armbian build
+        run: |
+          git clone --depth=1 \
+            "${ARMBIAN_REPO}" \
+            armbian-build
+
+          cd armbian-build
+
+          echo "=== Repository ==="
+          git remote -v
+
+          echo "=== Commit ==="
+          git log -1 --oneline
+
+      - name: Verify Tinker Board configuration
+        run: |
+          cd armbian-build
+
+          test -f config/boards/tinkerboard.conf
+
+          echo "=== tinkerboard.conf ==="
+          cat config/boards/tinkerboard.conf
+
+          grep -q 'BOOTCONFIG="tinker-s-rk3288_defconfig"' \
+            config/boards/tinkerboard.conf
+
+          grep -q 'BOOT_SOC="rk3288"' \
+            config/boards/tinkerboard.conf
+
+      - name: Build kernel only
+        env:
+          KERNEL_BRANCH: ${{ inputs.kernel_branch }}
+        run: |
+          cd armbian-build
+
+          ./compile.sh \
+            BOARD="${BOARD}" \
+            BRANCH="${KERNEL_BRANCH}" \
+            KERNEL_ONLY=yes \
+            KERNEL_CONFIGURE=no \
+            BUILD_MINIMAL=yes \
+            BUILD_DESKTOP=no \
+            NO_APT_CACHER=yes
+
+      - name: Inspect build output
+        run: |
+          cd armbian-build
+
+          echo "=== OUTPUT ==="
+          find output -maxdepth 4 -type f \
+            \( -name "*.deb" -o -name "*.img" -o -name "*.tar*" \) \
+            -print | sort || true
+
+          echo
+          echo "=== DEBS ==="
+          find output -type f -name "*.deb" -print | sort || true
+
+      - name: Collect kernel packages
+        run: |
+          mkdir -p kernel-artifact/debs
+
+          find armbian-build/output \
+            -type f \
+            -name "*.deb" \
+            -exec cp -v {} kernel-artifact/debs/ \;
+
+          echo "=== Collected packages ==="
+          find kernel-artifact/debs -type f -print | sort
+
+      - name: Extract kernel packages
+        run: |
+          mkdir -p kernel-artifact/extracted
+
+          IMAGE_DEB=$(find kernel-artifact/debs \
+            -type f \
+            -name 'linux-image*.deb' \
+            | head -n1)
+
+          DTB_DEB=$(find kernel-artifact/debs \
+            -type f \
+            -name 'linux-dtb*.deb' \
+            | head -n1)
+
+          if [ -n "$IMAGE_DEB" ]; then
+            echo "Extracting:"
+            echo "$IMAGE_DEB"
+
+            dpkg-deb -x "$IMAGE_DEB" \
+              kernel-artifact/extracted
+          fi
+
+          if [ -n "$DTB_DEB" ]; then
+            echo "Extracting:"
+            echo "$DTB_DEB"
+
+            dpkg-deb -x "$DTB_DEB" \
+              kernel-artifact/extracted
+          fi
+
+      - name: Collect kernel files
+        run: |
+          mkdir -p kernel-artifact/boot
+          mkdir -p kernel-artifact/dtb
+          mkdir -p kernel-artifact/modules
+          mkdir -p kernel-artifact/metadata
+
+          echo "=== BOOT FILES ==="
+
+          find kernel-artifact/extracted/boot \
+            -maxdepth 1 \
+            -type f \
+            -print \
+            -exec cp -v {} kernel-artifact/boot/ \; \
+            2>/dev/null || true
+
+          echo
+          echo "=== RK3288 DTB ==="
+
+          find kernel-artifact/extracted \
+            -type f \
+            \( \
+              -name 'rk3288-tinker.dtb' \
+              -o \
+              -name 'rk3288-tinker-s.dtb' \
+            \) \
+            -print \
+            -exec cp -v {} kernel-artifact/dtb/ \; \
+            || true
+
+          echo
+          echo "=== ALL RK3288 DTB ==="
+
+          find kernel-artifact/extracted \
+            -type f \
+            -name '*rk3288*.dtb' \
+            -print || true
+
+          echo
+          echo "=== MODULES ==="
+
+          if [ -d kernel-artifact/extracted/lib/modules ]; then
+            cp -a \
+              kernel-artifact/extracted/lib/modules \
+              kernel-artifact/modules/
+          fi
+
+      - name: Detect kernel version
+        run: |
+          KVER=""
+
+          if [ -d kernel-artifact/modules/modules ]; then
+            KVER=$(find kernel-artifact/modules/modules \
+              -mindepth 1 \
+              -maxdepth 1 \
+              -type d \
+              -printf '%f\n' \
+              | head -n1)
+          fi
+
+          if [ -z "$KVER" ]; then
+            KVER="unknown"
+          fi
+
+          echo "$KVER" \
+            | tee kernel-artifact/metadata/kernel-version.txt
+
+      - name: Save build metadata
+        run: |
+          echo "RK3288" \
+            > kernel-artifact/metadata/soc.txt
+
+          echo "Tinker Board S" \
+            > kernel-artifact/metadata/board.txt
+
+          echo "${{ inputs.kernel_branch }}" \
+            > kernel-artifact/metadata/kernel-branch.txt
+
+          echo "${{ inputs.builder_name }}" \
+            > kernel-artifact/metadata/builder.txt
+
+          cd armbian-build
+
+          git rev-parse HEAD \
+            > ../kernel-artifact/metadata/armbian-commit.txt
+
+          git log -1 --format='%H%n%ad%n%s' \
+            --date=iso \
+            > ../kernel-artifact/metadata/build-commit.txt
+
+      - name: Show final files
+        run: |
+          echo "=============================="
+          echo " FINAL KERNEL ARTIFACT"
+          echo "=============================="
+
+          find kernel-artifact \
+            -type f \
+            -printf '%p\t%k KB\n' \
+            | sort
+
+      - name: Create SHA256SUMS
+        run: |
+          cd kernel-artifact
+
+          find . \
+            -type f \
+            ! -name SHA256SUMS \
+            -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > SHA256SUMS
+
+      - name: Create kernel archive
+        run: |
+          tar -czf \
+            OpenWrt-RK3288-TinkerBoardS-kernel.tar.gz \
+            -C kernel-artifact \
+            .
+
+          sha256sum \
+            OpenWrt-RK3288-TinkerBoardS-kernel.tar.gz \
+            > OpenWrt-RK3288-TinkerBoardS-kernel.tar.gz.sha256
+
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RK3288-TinkerBoardS-kernel-${{ inputs.kernel_branch }}
+          path: |
+            kernel-artifact/
+            OpenWrt-RK3288-TinkerBoardS-kernel.tar.gz
+            OpenWrt-RK3288-TinkerBoardS-kernel.tar.gz.sha256
+          compression-level: 0
+          retention-days: 30

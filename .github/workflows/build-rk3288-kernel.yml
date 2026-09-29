@@ -1,6 +1,6 @@
 name: Build RK3288 Kernel
 
-on:
+on:q
   workflow_dispatch:
     inputs:
       kernel_branch:
@@ -112,13 +112,9 @@ jobs:
           echo "Commit:"
           git log -1 --oneline
 
-          echo
-          echo "Branch:"
-          git branch --show-current
-
 
       # ============================================================
-      # VERIFY BOARD
+      # VERIFY TINKER BOARD
       # ============================================================
 
       - name: Verify Tinker Board configuration
@@ -134,7 +130,7 @@ jobs:
           cat config/boards/tinkerboard.conf
 
           echo
-          echo "Checking RK3288 configuration..."
+          echo "Checking RK3288..."
 
           grep -q \
             'BOOTCONFIG="tinker-s-rk3288_defconfig"' \
@@ -149,10 +145,25 @@ jobs:
 
 
       # ============================================================
-      # BUILD KERNEL ONLY
+      # SHOW CLI HELP
       # ============================================================
 
-      - name: Build kernel only
+      - name: Check Armbian kernel CLI
+        run: |
+          cd armbian-build
+
+          echo "========================================"
+          echo " ARMBIAN KERNEL CLI"
+          echo "========================================"
+
+          ./compile.sh kernel --help || true
+
+
+      # ============================================================
+      # BUILD KERNEL
+      # ============================================================
+
+      - name: Build RK3288 kernel
         env:
           KERNEL_BRANCH: ${{ inputs.kernel_branch }}
         run: |
@@ -162,22 +173,14 @@ jobs:
           echo " BUILD RK3288 KERNEL"
           echo "========================================"
 
-          echo "BOARD        = ${BOARD}"
-          echo "BRANCH       = ${KERNEL_BRANCH}"
-          echo "RELEASE      = noble"
-          echo "KERNEL_ONLY  = yes"
-          echo "CONFIGURE    = no"
+          echo "BOARD   = ${BOARD}"
+          echo "BRANCH  = ${KERNEL_BRANCH}"
+          echo "RELEASE = noble"
 
-          ./compile.sh \
-            build \
+          ./compile.sh kernel \
             BOARD="${BOARD}" \
             BRANCH="${KERNEL_BRANCH}" \
-            RELEASE=noble \
-            KERNEL_ONLY=yes \
-            KERNEL_CONFIGURE=no \
-            BUILD_MINIMAL=yes \
-            BUILD_DESKTOP=no \
-            NO_APT_CACHER=yes
+            RELEASE=noble
 
 
       # ============================================================
@@ -196,50 +199,46 @@ jobs:
           if [ -d output ]; then
 
             echo
-            echo "=== DEB PACKAGES ==="
+            echo "=== ALL OUTPUT FILES ==="
+
+            find output \
+              -type f \
+              -print \
+              | sort
+
+            echo
+            echo "=== DEB ==="
 
             find output \
               -type f \
               -name "*.deb" \
               -print \
-              | sort || true
+              | sort
 
             echo
-            echo "=== OTHER OUTPUT ==="
-
-            find output \
-              -type f \
-              \( \
-                -name "*.img" \
-                -o -name "*.img.xz" \
-                -o -name "*.img.gz" \
-                -o -name "*.tar" \
-                -o -name "*.tar.gz" \
-              \) \
-              -print \
-              | sort || true
-
-            echo
-            echo "=== BOOT FILES ==="
+            echo "=== KERNEL / DTB ==="
 
             find output \
               -type f \
               \( \
                 -name "zImage" \
                 -o -name "Image" \
-                -o -name "uImage" \
                 -o -name "*.dtb" \
+                -o -name "System.map*" \
+                -o -name "config-*" \
               \) \
               -print \
-              | sort || true
+              | sort
 
           else
+
             echo "output directory does not exist."
+
           fi
 
 
       # ============================================================
-      # COLLECT DEB
+      # COLLECT PACKAGES
       # ============================================================
 
       - name: Collect kernel packages
@@ -250,12 +249,11 @@ jobs:
           find armbian-build/output \
             -type f \
             -name "*.deb" \
-            -exec cp -v {} kernel-artifact/debs/ \;
+            -exec cp -v {} kernel-artifact/debs/ \; \
+            || true
 
           echo
-          echo "========================================"
-          echo " COLLECTED DEB PACKAGES"
-          echo "========================================"
+          echo "Collected packages:"
 
           find kernel-artifact/debs \
             -type f \
@@ -267,66 +265,31 @@ jobs:
       # EXTRACT KERNEL IMAGE
       # ============================================================
 
-      - name: Extract kernel image package
+      - name: Extract kernel packages
         if: success()
         run: |
           mkdir -p kernel-artifact/extracted
 
-          IMAGE_DEB=$(find kernel-artifact/debs \
-            -type f \
-            -name 'linux-image*.deb' \
-            | head -n1)
+          for DEB in kernel-artifact/debs/*.deb; do
 
-          if [ -n "${IMAGE_DEB}" ]; then
+            [ -f "$DEB" ] || continue
 
+            echo
             echo "Extracting:"
-            echo "${IMAGE_DEB}"
+            echo "$DEB"
 
-            dpkg-deb \
-              -x "${IMAGE_DEB}" \
+            dpkg-deb -x \
+              "$DEB" \
               kernel-artifact/extracted
 
-          else
-
-            echo "No linux-image package found."
-
-          fi
+          done
 
 
       # ============================================================
-      # EXTRACT DTB PACKAGE
+      # COLLECT BOOT
       # ============================================================
 
-      - name: Extract DTB package
-        if: success()
-        run: |
-          DTB_DEB=$(find kernel-artifact/debs \
-            -type f \
-            -name 'linux-dtb*.deb' \
-            | head -n1)
-
-          if [ -n "${DTB_DEB}" ]; then
-
-            echo "Extracting:"
-            echo "${DTB_DEB}"
-
-            dpkg-deb \
-              -x "${DTB_DEB}" \
-              kernel-artifact/extracted
-
-          else
-
-            echo "No separate linux-dtb package found."
-            echo "DTB may be included inside linux-image."
-
-          fi
-
-
-      # ============================================================
-      # COLLECT BOOT FILES
-      # ============================================================
-
-      - name: Collect kernel boot files
+      - name: Collect boot files
         if: success()
         run: |
           mkdir -p kernel-artifact/boot
@@ -338,7 +301,6 @@ jobs:
           if [ -d kernel-artifact/extracted/boot ]; then
 
             find kernel-artifact/extracted/boot \
-              -maxdepth 1 \
               -type f \
               -print \
               -exec cp -v {} kernel-artifact/boot/ \;
@@ -346,7 +308,7 @@ jobs:
           fi
 
           echo
-          echo "Collected boot files:"
+          echo "Collected:"
 
           find kernel-artifact/boot \
             -type f \
@@ -355,7 +317,7 @@ jobs:
 
 
       # ============================================================
-      # COLLECT RK3288 DTB
+      # COLLECT DTB
       # ============================================================
 
       - name: Collect RK3288 DTB
@@ -369,22 +331,9 @@ jobs:
 
           find kernel-artifact/extracted \
             -type f \
-            \( \
-              -name "rk3288-tinker.dtb" \
-              -o \
-              -name "rk3288-tinker-s.dtb" \
-            \) \
-            -print \
-            -exec cp -v {} kernel-artifact/dtb/ \; \
-            || true
-
-          echo
-          echo "All RK3288 DTBs found:"
-
-          find kernel-artifact/extracted \
-            -type f \
             -name "*rk3288*.dtb" \
             -print \
+            -exec cp -v {} kernel-artifact/dtb/ \; \
             || true
 
           echo
@@ -400,14 +349,10 @@ jobs:
       # COLLECT MODULES
       # ============================================================
 
-      - name: Collect kernel modules
+      - name: Collect modules
         if: success()
         run: |
           mkdir -p kernel-artifact/modules
-
-          echo "========================================"
-          echo " KERNEL MODULES"
-          echo "========================================"
 
           if [ -d kernel-artifact/extracted/lib/modules ]; then
 
@@ -415,27 +360,22 @@ jobs:
               kernel-artifact/extracted/lib/modules \
               kernel-artifact/modules/
 
-          else
-
-            echo "No modules directory found."
-
           fi
 
-          echo
-          echo "Module directories:"
+          echo "========================================"
+          echo " MODULES"
+          echo "========================================"
 
           find kernel-artifact/modules \
-            -mindepth 1 \
-            -maxdepth 2 \
-            -type d \
+            -type f \
             -print \
-            2>/dev/null \
             | sort \
+            | head -200 \
             || true
 
 
       # ============================================================
-      # DETECT KERNEL VERSION
+      # KERNEL VERSION
       # ============================================================
 
       - name: Detect kernel version
@@ -457,19 +397,19 @@ jobs:
 
           fi
 
-          if [ -z "${KVER}" ]; then
+          if [ -z "$KVER" ]; then
             KVER="unknown"
           fi
 
-          echo "${KVER}" \
+          echo "$KVER" \
             | tee kernel-artifact/metadata/kernel-version.txt
 
 
       # ============================================================
-      # BUILD METADATA
+      # METADATA
       # ============================================================
 
-      - name: Save build metadata
+      - name: Save metadata
         if: success()
         run: |
           mkdir -p kernel-artifact/metadata
@@ -501,15 +441,15 @@ jobs:
 
 
       # ============================================================
-      # SHOW FINAL FILES
+      # FINAL FILE LIST
       # ============================================================
 
-      - name: Show final kernel files
+      - name: Show final files
         if: success()
         run: |
           echo
           echo "========================================"
-          echo " FINAL KERNEL ARTIFACT"
+          echo " FINAL KERNEL"
           echo "========================================"
 
           find kernel-artifact \
@@ -540,14 +480,13 @@ jobs:
 
 
       # ============================================================
-      # CREATE TAR.GZ
+      # ARCHIVE
       # ============================================================
 
       - name: Create kernel archive
         if: success()
         run: |
-          tar \
-            -czf \
+          tar -czf \
             OpenWrt-RK3288-TinkerBoardS-kernel.tar.gz \
             -C kernel-artifact \
             .
@@ -556,18 +495,13 @@ jobs:
             OpenWrt-RK3288-TinkerBoardS-kernel.tar.gz \
             > OpenWrt-RK3288-TinkerBoardS-kernel.tar.gz.sha256
 
-          echo
-          echo "========================================"
-          echo " ARCHIVE"
-          echo "========================================"
-
           ls -lh \
             OpenWrt-RK3288-TinkerBoardS-kernel.tar.gz \
             OpenWrt-RK3288-TinkerBoardS-kernel.tar.gz.sha256
 
 
       # ============================================================
-      # UPLOAD ARTIFACT
+      # UPLOAD
       # ============================================================
 
       - name: Upload kernel artifact
